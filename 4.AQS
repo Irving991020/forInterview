@@ -1,0 +1,17 @@
+AQS全程AbstractQueuedSynchronizer
+“AQS (AbstractQueuedSynchronizer) 是 JUC 包下的核心组件，它是实现 ReentrantLock、Semaphore 等同步器的基石。
+
+
+State (资源状态)： 一个 volatile int 变量。比如 ReentrantLock 用它来记录锁的持有状态和重入次数。
+
+CLH 队列： 一个双向链表。当线程 CAS 抢锁失败时，会被封装成 Node 节点加入队尾，并被阻塞（park）。
+
+模板方法设计： AQS 封装了复杂的队列管理和线程阻塞/唤醒逻辑，子类只需要实现 tryAcquire 和 tryRelease 等简单的状态判断逻辑即可。
+
+此外，AQS 支持公平和非公平两种模式。默认是非公平的，因为非公平模式下，新来的线程有机会直接抢占资源，减少了线程上下文切换的开销，性能更好。”
+
+
+
+
+
+

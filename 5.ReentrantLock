@@ -1,0 +1,8 @@
+ReentrantLock 这个类是实现LOCK类
+然后里面有sync的内部类，这个内部类继承了AQS
+
+比较维度,ReentrantLock (独占锁),CountDownLatch (共享锁)
+State 的含义,"持有锁的数量 (0=无, 1=有, >1=重入)",倒计时的剩余数量 (N -> 0)
+tryAcquire 逻辑,state == 0 ? 抢 : 失败,state == 0 ? 通过 : 阻塞
+tryRelease 逻辑,state - 1，若为 0 则彻底释放,state - 1，若为 0 则唤醒所有人
+资源共享性,独享 (Exclusive),共享 (Shared)
