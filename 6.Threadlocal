@@ -1,0 +1,89 @@
+ThreadLocal 其实是线程本身里面的map对象里面的key值。
+也就是说这个类里面的数据其实是在线程里。
+
+threadlocal是很容易发生内存泄漏的。因为这个key是弱引用的，value是强引用的。
+业务代码跑完了，key被gc回收了，value还在。所以会有很多key是null，value还存在
+所以，只要线程还活着，value就会越来越大，会一直无法被gc回收。
+解决方法就是用完一定要在finally里面remove掉。
+
+他这个map和1.8jdk里的map处理方式不一致。他是如果数组值一直的话，1.8是去拉链表，他是往后挪一个数组值
+为什么不用链表？ 因为 ThreadLocalMap 里的数据通常很少（一个线程也就存几个变量），用线性探测法足够快，而且省去了 next 指针的内存开销。
+
+-------什么时候用 ThreadLocal？-----
+
+5. 什么时候用 ThreadLocal？（实战场景）
+别光背八股文，要结合业务说。
+
+Spring 的事务管理：
+
+@Transactional 为什么能保证同一个连接？
+
+因为它把数据库连接（Connection）存在了 ThreadLocal 里，同一个线程里怎么拿都是同一个连接。
+
+用户上下文传递 (UserContext)：
+
+在拦截器（Interceptor）里解析 Token，把用户信息 set 进 ThreadLocal。
+
+在 Service 层任何地方，直接 get 就能拿到当前登录用户，不用层层传参。
+
+日期格式化 (SimpleDateFormat)：
+
+SimpleDateFormat 是线程不安全的。
+
+以前我们为了安全，会给每个线程配一个 ThreadLocal<SimpleDateFormat>（虽然现在 JDK 8 都用 DateTimeFormatter 了）。
+
+
+
+
+
+
+“ThreadLocal 是一种空间换时间的线程隔离机制。
+
+原理： 它的数据并不存在 ThreadLocal 对象里，而是存在当前线程对象 (Thread) 的 threadLocals 字段中。ThreadLocal 只是作为 Map 的 Key。
+
+内存泄漏： ThreadLocalMap 中的 Key 是弱引用，Value 是强引用。如果线程复用（如线程池）且不手动删除，Key 会被 GC 回收变成 null，但 Value 依然被线程强引用，导致无法回收。
+
+最佳实践： 必须遵循 try-finally 模式，在 finally 代码块中调用 remove() 方法清理数据。
+
+Hash 冲突： 它采用的是线性探测法，而不是 HashMap 的链表法。”
+
+
+
+
+5年经验总结（背下这段）
+“ThreadLocal 是一种空间换时间的线程隔离机制。
+
+原理： 它的数据并不存在 ThreadLocal 对象里，而是存在当前线程对象 (Thread) 的 threadLocals 字段中。ThreadLocal 只是作为 Map 的 Key。
+
+内存泄漏： ThreadLocalMap 中的 Key 是弱引用，Value 是强引用。如果线程复用（如线程池）且不手动删除，Key 会被 GC 回收变成 null，但 Value 依然被线程强引用，导致无法回收。
+
+最佳实践： 必须遵循 try-finally 模式，在 finally 代码块中调用 remove() 方法清理数据。
+
+Hash 冲突： 它采用的是线性探测法，而不是 HashMap 的链表法。”
+
+
+
+
+如果面试官问你：“你在项目中怎么用 ThreadLocal？”
+
+你可以这样回答：
+
+“我在项目里主要用 ThreadLocal 来解决用户上下文透传的问题。
+
+我们封装了一个 UserContextHolder 工具类。在 Spring 的拦截器（Interceptor）的 preHandle 方法里，解析 Token 并将用户信息 set 进 ThreadLocal。
+
+这样在 Service 层任何地方都能直接获取当前用户，避免了参数层层传递的耦合。
+
+最关键的是： 我会在拦截器的 afterCompletion 方法里，强制调用 ThreadLocal.remove()。这是为了防止在 Tomcat 线程池复用的场景下，出现内存泄漏或者用户信息串号的严重 Bug。”
+
+
+
+
+
+
+
+
+
+
+
+

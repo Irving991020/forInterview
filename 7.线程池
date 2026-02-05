@@ -1,0 +1,135 @@
+public ThreadPoolExecutor(
+    int corePoolSize,    // 1. 核心线程数
+    int maximumPoolSize, // 2. 最大线程数
+    long keepAliveTime,  // 3. 空闲存活时间
+    TimeUnit unit,       // 4. 时间单位
+    BlockingQueue<Runnable> workQueue, // 5. 工作队列
+    ThreadFactory threadFactory,       // 6. 线程工厂
+    RejectedExecutionHandler handler   // 7. 拒绝策略
+)
+
+口诀：
+
+先用核心。
+
+核心满了，进队列（你可以等）。
+
+队列满了，开最大（临时工顶上）。
+
+最大满了，拒绝（崩溃边缘）。
+
+
+. 真实的业务代码：怎么写才专业？
+你提到想要真实场景代码。在 Spring Boot 项目中，我们通常会配置一个全局通用的线程池，用于处理异步任务（比如：发送短信、生成报表、异步落库）。
+
+4. 面试必问：4 种拒绝策略，你选哪个？
+当队列满、线程满，必须拒绝时，AQS 提供了 4 种策略。作为 5 年开发，你要知道不同场景选哪个：
+
+AbortPolicy (默认)： 直接抛异常 RejectedExecutionException。
+
+场景： 比较重要的核心业务，不能默默丢数据，必须让调用方感知到错误，然后报警人工介入。
+
+DiscardPolicy： 默默丢弃任务，不抛异常。
+
+场景： 极不重要的数据，比如日志采集、点赞数统计。丢了就丢了。
+
+DiscardOldestPolicy： 把队列里最老的（排队最久的）扔掉，把新任务塞进去。
+
+场景： 喜新厌旧的数据，比如传感器上报最新的温度，老的没意义了。
+
+CallerRunsPolicy (最常用)： 谁调用的谁执行。
+
+场景： 一般业务都用这个。线程池满了，就让主线程（Http 请求线程）自己去发短信。虽然会把主线程卡住（响应变慢），但保证了数据不丢失，同时起到了削峰的作用（主线程慢了，进来的请求自然就少了）。
+
+
+5. 面试核弹：为什么不建议用 Executors？
+如果面试官问：“图省事，我直接用 Executors.newFixedThreadPool(10) 行不行？”
+
+斩钉截铁地回答：不行！
+
+这是阿里巴巴开发手册明确禁止的。
+
+FixedThreadPool 和 SingleThreadPool：
+
+它们底层的队列是 LinkedBlockingQueue，但是没有设置容量上限（默认是 Integer.MAX_VALUE，约 21 亿）。
+
+后果： 只要请求堆积，队列会无限增长，直到把服务器内存吃光，导致 OOM (Out Of Memory)。
+
+CachedThreadPool：
+
+它允许创建的线程数量是 Integer.MAX_VALUE。
+
+后果： 只要请求够多，它会创建几万个线程，导致 CPU 100% 卡死 或 OOM。
+
+满分回答总结： “我在生产环境中从不使用 Executors 工具类，因为它们要么是无界队列（导致 OOM），要么是无界线程数（导致 CPU 飙升）。我都是使用 ThreadPoolExecutor 手动创建，明确指定核心参数、有界队列长度和拒绝策略（通常是 CallerRunsPolicy）。”
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@Configuration
+public class ThreadPoolConfig {
+
+    @Bean("commonThreadPool")
+    public ThreadPoolExecutor commonThreadPool() {
+        // 1. 核心线程数：CPU 核数 + 1 (IO 密集型可以设更大)
+        int corePoolSize = Runtime.getRuntime().availableProcessors() + 1;
+
+        // 2. 最大线程数：核心数的 2 倍
+        int maxPoolSize = corePoolSize * 2;
+
+        // 3. 队列容量：一定要设限！防止 OOM
+        int queueCapacity = 1000;
+
+        // 4. 存活时间：60秒
+        long keepAliveTime = 60;
+
+        return new ThreadPoolExecutor(
+            corePoolSize,
+            maxPoolSize,
+            keepAliveTime,
+            TimeUnit.SECONDS,
+            // 【坑点】千万别用无界队列 LinkedBlockingQueue()，否则最大线程数参数失效，且容易 OOM
+            new LinkedBlockingQueue<>(queueCapacity),
+
+            // 【规范】自定义线程工厂，给线程起个好名字，方便查日志
+            new NamedThreadFactory("biz-pool-"),
+
+            // 【策略】拒绝策略：CallerRunsPolicy (由调用者自己运行)
+            // 意思是：线程池满了，谁调用的这个任务，谁自己去执行（比如主线程自己干）。
+            // 这样可以“降速”，防止数据丢失。
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
+
+    // 自定义简单的线程工厂
+    static class NamedThreadFactory implements ThreadFactory {
+        private final AtomicInteger threadNumber = new AtomicInteger(1);
+        private final String namePrefix;
+
+        public NamedThreadFactory(String namePrefix) {
+            this.namePrefix = namePrefix;
+        }
+
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, namePrefix + threadNumber.getAndIncrement());
+        }
+    }
+}

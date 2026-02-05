@@ -1,0 +1,134 @@
+nohup java
+-Xms2048m
+-Xmx10240m
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=200
+-XX:+PrintGCDetails
+-jar -Dspring.profiles.active=dev lkd_hd.jar
+> logs/info.log 2>&1 &
+
+
+
+nohup ... &
+
+nohup (No Hang Up)： 意思是不挂断。当你关闭 SSH 连接终端（Terminal）时，普通的程序会被杀掉（收到 SIGHUP 信号）。加了 nohup，你关掉窗口，程序依然活着。
+
+& (最后那个符号)： 意思是后台运行。让程序在后台默默跑，不占用你当前的控制台，你可以继续敲其他命令
+
+第二部分：JVM 内存与 GC 参数（核心调优）
+这是你最关心的部分，也是面试官最爱问的。
+
+-Xms2048m
+
+含义： 堆内存的初始大小 (Initial Heap Size) 为 2GB。
+
+作用： 程序一启动，直接向操作系统要 2GB 内存。
+
+-Xmx10240m
+
+含义： 堆内存的最大大小 (Max Heap Size) 为 10GB。
+
+分析： 这是一个大内存应用（10GB）。
+
+⚠️ 5年经验优化点： 这里的初始值 (2G) 和最大值 (10G) 差距很大。
+
+缺点： 程序运行过程中，如果内存不够了，JVM 需要不断向操作系统申请内存进行扩容，这会带来性能抖动。
+
+建议： 在生产环境（特别是容器化环境），通常建议 -Xms 和 -Xmx 设置成一样大（比如都设为 10240m）。这样可以避免运行时扩容带来的震荡，启动即巅峰。
+
+-XX:+UseG1GC
+
+含义： 指定使用 G1 垃圾回收器。
+
+评价： 非常正确的选择！
+
+原因： 你的堆内存有 10GB。如果用旧的 CMS 或 Parallel，Full GC 一次可能要卡顿好几秒。G1 就是专门为**大堆内存（通常 > 4GB）**设计的，它能把停顿时间控制得很好。
+
+-XX:MaxGCPauseMillis=200
+
+含义： 告诉 G1：“兄弟，虽然你要回收垃圾，但请尽量把每次卡顿（STW）的时间控制在 200毫秒 以内。”
+
+分析： 这是 G1 最核心的调优参数。200ms 是一个兼顾了吞吐量和响应速度的黄金数值。
+
+-XX:+PrintGCDetails
+
+含义： 打印详细的 GC 日志。
+
+作用： 当发生 GC 时，会在日志里输出详细的回收细节（新生代回收了多少、老年代回收了多少、耗时多少）。
+
+⚠️ 优化点： 这些日志默认会输出到标准输出（stdout），也就是混在了你的业务日志里。如果 GC 频繁，日志会刷屏。建议配合 -Xloggc:logs/gc.log 把 GC 日志单独存一个文件，方便排查。
+第三部分：应用配置（Spring Boot）
+-jar
+
+告诉 Java：“我要启动的是一个可执行的 Jar 包”。
+
+-Dspring.profiles.active=dev
+
+含义： 这是一个系统属性 (System Property)。
+
+作用： 激活 Spring Boot 的 dev 环境配置。它会去加载 application-dev.yml 或 application-dev.properties 里的配置（比如连开发库的数据库）。
+
+⚠️ 位置很重要： 这个参数必须放在 -jar 之前，java 之后。如果放在 lkd_hd.jar 后面，Spring 可能读不到。你的命令里位置是对的。
+
+lkd_hd.jar
+
+你要运行的 Jar 包文件名。
+
+第四部分：日志重定向（IO 操作）
+> logs/info.log
+
+含义： 将标准输出 (stdout)（也就是代码里 System.out.println 打印的东西）写入到 logs/info.log 文件里。
+
+注意： 这里的 > 是覆盖模式。每次重启，日志会被清空重写。如果是生产环境，通常建议用 >>（追加模式），保留历史日志。
+
+2>&1
+
+含义： 这是一个 Linux 的黑话。
+
+1 代表标准输出 (Standard Output)。
+
+2 代表错误输出 (Standard Error，比如 e.printStackTrace() 打印的堆栈)。
+
+2>&1 的意思就是：把错误日志（2）也像标准日志（1）一样，输出到同一个地方去。
+
+结果： 这样你的 info.log 里既有正常的业务日志，也有报错的堆栈信息，不会漏掉错误。
+
+
+
+总结与评分
+这条命令打分：85 分。
+
+优点：
+
+使用了 G1 回收器，适配 10GB 大内存场景。
+
+设置了 G1 的停顿时间目标。
+
+使用了 nohup 后台运行和日志重定向。
+
+针对面试或生产环境的优化建议（加分项）：
+
+消除内存抖动： 建议 -Xms10240m -Xmx10240m（初始=最大）。
+
+日志分离： GC 日志最好单独存，不要混在业务日志里。
+
+增加：-Xloggc:logs/gc.log
+
+日志保留： 建议将 > 改为 >>，防止重启后丢失上次的案发现场。
+
+OOM 自动 Dump： 强烈建议加上这两个参数，否则一旦 OOM 挂了，你没法分析原因（就像没法做尸检）：
+
+-XX:+HeapDumpOnOutOfMemoryError (OOM 时自动生成 Dump 文件)
+
+-XX:HeapDumpPath=logs/heapdump.hprof (文件存哪)
+
+优化后的终极版命令：
+
+Bash
+
+nohup java -Xms10240m -Xmx10240m \
+-XX:+UseG1GC -XX:MaxGCPauseMillis=200 \
+-XX:+PrintGCDetails -Xloggc:logs/gc.log \
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=logs/heapdump.hprof \
+-jar -Dspring.profiles.active=dev lkd_hd.jar \
+>> logs/info.log 2>&1 &
