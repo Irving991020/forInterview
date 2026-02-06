@@ -1,0 +1,395 @@
+redis
+是单线程的，纯内存操作，所以非常快
+有3个概念 缓存穿透 缓存击穿，缓存雪崩
+1.缓存雪崩：
+顾名思义，就是雪崩。大量的key同一时间过期，导致大量的key同一时间去查库，导致数据库压力过大
+解决办法：不让key同一时间过期就好了，设置个时间+随机几个分钟
+public void setWithRandomExpire(String key, String value, long time) {
+        // 1. 计算随机值：在原时间基础上，增加 1~5 分钟的随机时间
+        // 这样 100万个 Key 就不会在同一秒过期了
+        long randomTime = (long) (Math.random() * 300);
+        long finalTime = time + randomTime;
+
+        // 2. 存入 Redis
+        redisTemplate.opsForValue().set(key, value, finalTime, TimeUnit.SECONDS);
+    }
+
+
+2.缓存击穿：热点key，过期，大量的查询查库
+解决：只允许一个查询，去查库。
+引入看门狗机制。redisson。使用方法很简单，只需要引入，然后操作的时候加锁就行了，他会每10秒去查询你这个过期时间喝业务时间。
+如果业务时间还在运行，过期时间快结束了，那就会自动续命，自动加时间
+
+@Service
+public class StockService {
+
+    @Autowired
+    private RedissonClient redisson; // 直接注入 Redisson 客户端
+
+    public void deductStock(Long goodsId) {
+        String lockKey = "lock:goods:" + goodsId;
+
+        // 1. 获取锁对象 (还没加锁，只是拿个引用)
+        RLock lock = redisson.gtLeock(lockKey);
+
+        try {
+            // 2. 【核心动作】加锁！
+            // 只要这一行执行成功，看门狗 (Watchdog) 后台线程就自动启动了
+            // 默认每 10秒检查一次，自动帮你续命，不用担心业务执行太久锁过期
+            lock.lock();
+
+            // 3. 执行真正的业务逻辑 (查库存 -> 减库存)
+            // 这里已经是单线程安全区域了
+            doBusiness();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            // 4. 【必须】在 finally 块中释放锁
+            // 只有是当前线程加的锁，才去释放 (Redisson 内部帮其实你判断了)
+            if (lock.isLocked() && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
+}
+
+
+
+3.缓存穿透：redis没有查到数据，数据库也没查到。如果疯狂查
+解决：如果redis查到是null，那就去数据库查询。查到了就设置，没查到就设置为空。具体代码就是是null，返回。查到是”“ 返回。查到user，就设置到redis里
+public User getUserById(Long id) {
+        String key = "user:" + id;
+
+        // 1. 先查缓存
+        String json = redisTemplate.opsForValue().get(key);
+
+        // 2. 如果缓存里有东西
+        if (json != null) {
+            // 【关键点】：判断是不是我们故意存的“空值标记” (比如空字符串)
+            if ("".equals(json)) {
+                // 是空值，说明数据库里真没有，直接返回 null，别去骚扰数据库
+                return null;
+            }
+            // 不是空值，正常反序列化返回
+            return JSON.parseObject(json, User.class);
+        }
+
+        // 3. 缓存没有，查数据库
+        User user = userMapper.selectById(id);
+
+        // 4. 数据库也没查到？ (遇到了黑客攻击或者冷门数据)
+        if (user == null) {
+            // 【关键代码】：存一个空字符串进去！并设置较短的过期时间（如 5分钟）
+            // 下次再查 -1，步骤 2 就会拦截住
+            redisTemplate.opsForValue().set(key, "", 5, TimeUnit.MINUTES);
+            return null;
+        }
+
+        // 5. 数据库查到了，正常写入缓存
+        redisTemplate.opsForValue().set(key, JSON.toJSONString(user), 30, TimeUnit.MINUTES);
+        return user;
+    }
+
+
+ 四、 解决“双写一致性” (Consistency)
+
+ 这个就很简单，如果数据库有更新的话，那就更新数据库，然后直接把mysql删了就行了。过着过两秒删除。
+ // 1. 【先】更新数据库
+         userMapper.updateById(user);
+
+         // 2. 【后】删除缓存
+         // 为什么是删，不是更新？因为“懒加载”思想。
+         // 下次有人查的时候，他自己会去数据库拿新的，再填入缓存。
+         // 这样避免了你频繁更新缓存，结果根本没人查，浪费性能。
+         redisTemplate.delete(key);
+         // 3. 【核心】延迟一会儿，再删一次
+             // 为了防止：在步骤2还没提交的时候，有读请求把脏数据又读进缓存了
+             threadPool.execute(() -> {
+                 try {
+                     Thread.sleep(500); // 睡 500ms
+                     redisTemplate.delete(key); // 再删一次，兜底
+                 } catch (InterruptedException e) {
+                     e.printStackTrace();
+                 }
+             });
+
+
+
+
+
+
+
+
+
+             这正是把 Redis 用活的关键。
+
+             除了刚才讲的“缓存三灾”和“分布式锁”这种保命型场景，Redis 在业务中其实还有 5 个非常经典的功能型场景。
+
+             我把这些场景的业务背景、底层数据结构和生产级代码都给你整理好了。这不仅是面试加分项，更是你工作中解决棘手问题的瑞士军刀。
+
+             场景一：实时排行榜 (Leaderboard)
+             业务背景： 直播间的“榜一大哥”、游戏的“战力榜”、电商的“热销榜”。
+
+             底层结构： ZSet (Sorted Set)。它自动根据分数排序，效率极高。
+
+             核心命令： ZADD (加分), ZREVRANGE (查前几名)。
+
+             生产代码 (RankingService):
+
+             Java
+
+             @Service
+             public class RankingService {
+
+                 @Autowired
+                 private StringRedisTemplate redisTemplate;
+
+                 private static final String RANK_KEY = "game:rank:daily";
+
+                 /**
+                  * 1. 玩家上分
+                  * @param userId 用户ID
+                  * @param score 分数
+                  */
+                 public void addScore(Long userId, double score) {
+                     // ZADD game:rank:daily 100 1001
+                     // 注意：如果是“累加分数”，可以使用 incrementScore
+                     redisTemplate.opsForZSet().incrementScore(RANK_KEY, String.valueOf(userId), score);
+                 }
+
+                 /**
+                  * 2. 获取前 10 名 (Top 10)
+                  * @return 包含用户ID和分数的列表
+                  */
+                 public List<Map<String, Object>> getTop10() {
+                     // ZREVRANGE game:rank:daily 0 9 WITHSCORES
+                     // reverseRange 表示从大到小排 (倒序)
+                     Set<ZSetOperations.TypedTuple<String>> set =
+                         redisTemplate.opsForZSet().reverseRangeWithScores(RANK_KEY, 0, 9);
+
+                     List<Map<String, Object>> list = new ArrayList<>();
+                     if (set != null) {
+                         for (ZSetOperations.TypedTuple<String> tuple : set) {
+                             Map<String, Object> map = new HashMap<>();
+                             map.put("userId", tuple.getValue()); // 用户ID
+                             map.put("score", tuple.getScore());  // 分数
+                             list.add(map);
+                         }
+                     }
+                     return list;
+                 }
+             }
+             场景二：延时队列 (Delayed Queue) —— 订单超时取消
+             业务背景： 用户下单后，30分钟没付款，系统自动取消订单。
+
+             实现方式： 不要用 RabbitMQ 的死信队列（太重），也不要用 Redis ZSet 轮询（代码复杂）。直接用 Redisson！
+
+             底层原理： Redisson 封装了 ZSet + 客户端轮询，做成了阻塞队列的样子。
+
+             生产代码 (OrderDelayService):
+
+             Java
+
+             @Service
+             public class OrderDelayService {
+
+                 @Autowired
+                 private RedissonClient redisson;
+
+                 /**
+                  * 1. 发送延时消息 (下单时调用)
+                  */
+                 public void addDelayOrder(Long orderId) {
+                     // 获取一个阻塞队列
+                     RBlockingQueue<Long> blockingQueue = redisson.getBlockingQueue("order:cancel:queue");
+                     // 获取对应的延时队列
+                     RDelayedQueue<Long> delayedQueue = redisson.getDelayedQueue(blockingQueue);
+
+                     // 【核心代码】30分钟后，这个 orderId 才会自动进入 blockingQueue
+                     delayedQueue.offer(orderId, 30, TimeUnit.MINUTES);
+
+                     System.out.println("订单 " + orderId + " 已加入延时队列，30分钟后过期");
+                 }
+
+                 /**
+                  * 2. 监听并处理 (系统启动时开启一个线程一直跑)
+                  */
+                 @PostConstruct
+                 public void startConsumer() {
+                     new Thread(() -> {
+                         RBlockingQueue<Long> blockingQueue = redisson.getBlockingQueue("order:cancel:queue");
+                         while (true) {
+                             try {
+                                 // 【核心代码】take() 是阻塞的。队列没数据就卡住，有数据瞬间唤醒。
+                                 Long orderId = blockingQueue.take();
+
+                                 System.out.println("收到过期订单，准备取消：" + orderId);
+                                 // 执行取消订单的 SQL ...
+
+                             } catch (InterruptedException e) {
+                                 e.printStackTrace();
+                             }
+                         }
+                     }).start();
+                 }
+             }
+             场景三：用户签到 / 在线状态 (BitMap)
+             业务背景： 记录用户全年的签到记录，或者统计“日活(DAU)”。数据量极大。
+
+             底层结构： Bitmap (位图)。
+
+             原理：用 0 和 1 记录。1 个字节能存 8 天的状态。365 天只需要 46 个字节，极省内存。
+
+             核心命令： SETBIT, BITCOUNT, GETBIT。
+
+             生产代码 (SignService):
+
+             Java
+
+             @Service
+             public class SignService {
+
+                 @Autowired
+                 private StringRedisTemplate redisTemplate;
+
+                 /**
+                  * 1. 用户签到
+                  * Key 格式：sign:userId:yyyyMM (按月存储)
+                  */
+                 public void doSign(Long userId) {
+                     // 获取今天是本月的第几天 (1-31)
+                     int dayOfMonth = LocalDate.now().getDayOfMonth();
+
+                     // Redis 的 offset 是从 0 开始的，所以要 -1
+                     int offset = dayOfMonth - 1;
+
+                     String key = "sign:" + userId + ":" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMM"));
+
+                     // SETBIT key offset 1
+                     // 把这某一位设为 1，表示已签到
+                     redisTemplate.opsForValue().setBit(key, offset, true);
+                 }
+
+                 /**
+                  * 2. 检查今天是否签到
+                  */
+                 public boolean checkSign(Long userId) {
+                     int dayOfMonth = LocalDate.now().getDayOfMonth();
+                     String key = "sign:" + userId + ":" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMM"));
+
+                     // GETBIT key offset
+                     return redisTemplate.opsForValue().getBit(key, dayOfMonth - 1);
+                 }
+
+                 /**
+                  * 3. 统计本月签到了多少次
+                  */
+                 public long countSign(Long userId) {
+                     String key = "sign:" + userId + ":" + LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMM"));
+
+                     // BITCOUNT key
+                     // 这一步需配合 execute，因为 RedisTemplate 原生方法对 bitcount 支持有限
+                     return redisTemplate.execute((RedisCallback<Long>) connection ->
+                         connection.bitCount(key.getBytes())
+                     );
+                 }
+             }
+             场景四：API 限流 (Rate Limiter)
+             业务背景： 防止恶意刷接口。比如“短信接口每分钟只能发 1 次”、“抢购接口每秒只许 1000 人访问”。
+
+             实现方式： 还是用 Redisson。不要自己写 Lua 脚本（容易写错）。
+
+             底层原理： 令牌桶算法 (Token Bucket)。
+
+             生产代码 (RateLimitService):
+
+             Java
+
+             @Service
+             public class RateLimitService {
+
+                 @Autowired
+                 private RedissonClient redisson;
+
+                 /**
+                  * 尝试访问接口
+                  * @param userId 用户ID
+                  * @return true=允许访问，false=被限流
+                  */
+                 public boolean tryAccess(Long userId) {
+                     // 定义一个限流器，Key 可以是接口名，也可以是 "接口名+IP"
+                     RRateLimiter rateLimiter = redisson.getRateLimiter("sms:limit:" + userId);
+
+                     // 初始化：每 1 分钟产生 1 个令牌
+                     // RateType.OVERALL: 全局限流
+                     // RateIntervalUnit.MINUTES: 单位分钟
+                     rateLimiter.trySetRate(RateType.OVERALL, 1, 1, RateIntervalUnit.MINUTES);
+
+                     // 尝试获取 1 个令牌
+                     // acquire() 是阻塞的，tryAcquire() 是非阻塞的
+                     return rateLimiter.tryAcquire(1);
+                 }
+             }
+             场景五：购物车 (Cart)
+             业务背景： 没登录时，购物车存在 Cookie 里；登录后，购物车存在 Redis 里。
+
+             底层结构： Hash (Map<String, Map<String, String>>)。
+
+             Key: cart:userId
+
+             HashKey: goodsId
+
+             Value: count (数量)
+
+             优势： 可以单独修改某件商品的数量，不需要把整个购物车序列化拿出来改完再塞回去。
+
+             生产代码 (CartService):
+
+             Java
+
+             @Service
+             public class CartService {
+
+                 @Autowired
+                 private StringRedisTemplate redisTemplate;
+
+                 /**
+                  * 添加购物车
+                  */
+                 public void addCart(Long userId, Long goodsId, int num) {
+                     String key = "cart:" + userId;
+                     String hashKey = String.valueOf(goodsId);
+
+                     // HINCRBY key field increment
+                     // 也就是：cart.get(userId).get(goodsId) += num
+                     redisTemplate.opsForHash().increment(key, hashKey, num);
+                 }
+
+                 /**
+                  * 获取购物车所有商品
+                  */
+                 public Map<Object, Object> getCart(Long userId) {
+                     String key = "cart:" + userId;
+                     // HGETALL key
+                     return redisTemplate.opsForHash().entries(key);
+                 }
+             }
+             💡 5年经验总结
+             面试官问：“你项目里 Redis 用来干嘛了？”
+
+             请抛弃： “就做了个缓存，存一下 User 对象。” (太初级)
+
+             请回答：
+
+             “除了常规的热点数据缓存（防穿透/雪崩）和分布式锁，我们还深度使用了 Redis 的多种数据结构：
+
+             使用 ZSet 实现了商品的实时热销排行榜。
+
+             结合 Redisson 实现了订单超时自动取消的延时队列。
+
+             利用 Bitmap 实现了用户千万级数据的签到统计，极大节省了存储空间。
+
+             在高并发接口上，使用了 Redisson 的 RateLimiter 做分布式限流。”
+
+             这 5 个代码片段，基本上覆盖了 90% 的 Redis 高级玩法。你能把这些融入到你的项目里吗？
